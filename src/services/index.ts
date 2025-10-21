@@ -18,6 +18,5 @@ export type {
   CameraMoveData,
   ObjectChangeData,
   AnnotationChangeData,
-  ChatMessageData,
   CursorMoveData
 } from './socketService';
