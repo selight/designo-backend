@@ -112,6 +112,7 @@ export class SocketService {
    * Broadcast annotation change to room
    */
   broadcastAnnotationChange(projectId: string, user: SocketUser, data: AnnotationChangeData): void {
+    // Broadcast to all users in the room except the sender
     this.io.to(projectId).emit('annotation-changed', {
       ...user,
       ...data
@@ -134,16 +135,37 @@ export class SocketService {
    */
   async handleObjectChange(projectId: string, user: SocketUser, data: ObjectChangeData): Promise<void> {
     try {
-      // Broadcast to other users first
-      this.broadcastObjectChange(projectId, user, data);
+      let shouldBroadcast = false;
       
-      // Update database
+      // Update database first
       if (data.action === 'add' && data.object) {
-        await projectService.addObject(projectId, data.object);
+        // Check if object already exists to prevent duplicates
+        const project = await projectService.getProjectById(projectId);
+        if (project) {
+          const existingIndex = project.objects.findIndex(obj => obj.id === data.object.id);
+          if (existingIndex === -1) {
+            await projectService.addObject(projectId, data.object);
+            shouldBroadcast = true;
+          } else {
+            console.warn(`Object with ID ${data.object.id} already exists, skipping add`);
+            return; // Don't broadcast if object already exists
+          }
+        }
       } else if (data.action === 'update' && data.object) {
-        await projectService.updateObject(projectId, data.object.id, data.object);
+        const success = await projectService.updateObject(projectId, data.object.id, data.object);
+        shouldBroadcast = success;
       } else if (data.action === 'delete' && data.objectId) {
-        await projectService.deleteObject(projectId, data.objectId);
+        const success = await projectService.deleteObject(projectId, data.objectId);
+        shouldBroadcast = success;
+      }
+      
+      // Only broadcast if there was an actual change
+      if (shouldBroadcast) {
+        // Broadcast to other users (excluding sender)
+        this.io.to(projectId).except(user.socketId).emit('object-changed', {
+          ...user,
+          ...data
+        });
       }
     } catch (error) {
       console.error('Error handling object change:', error);
@@ -161,9 +183,6 @@ export class SocketService {
    */
   async handleAnnotationChange(projectId: string, user: SocketUser, data: AnnotationChangeData): Promise<void> {
     try {
-      // Broadcast to other users first
-      this.broadcastAnnotationChange(projectId, user, data);
-      
       // Get current project to update objects
       const project = await projectService.getProjectById(projectId);
       if (!project) {
@@ -171,21 +190,41 @@ export class SocketService {
       }
       
       let updatedObjects = [...project.objects];
+      let shouldBroadcast = false;
       
-      // Update objects array (annotations are now part of objects)
+
       if (data.action === 'add' && data.annotation) {
-        updatedObjects.push(data.annotation);
+        const existingIndex = updatedObjects.findIndex(obj => obj.id === data.annotation.id);
+        if (existingIndex === -1) {
+          updatedObjects.push(data.annotation);
+          shouldBroadcast = true;
+        } else {
+          console.warn(`Annotation with ID ${data.annotation.id} already exists, skipping add`);
+          return;
+        }
       } else if (data.action === 'update' && data.annotation) {
         const index = updatedObjects.findIndex(obj => obj.id === data.annotation.id);
         if (index !== -1) {
           updatedObjects[index] = data.annotation;
+          shouldBroadcast = true;
         }
       } else if (data.action === 'delete' && data.annotationId) {
+        const initialLength = updatedObjects.length;
         updatedObjects = updatedObjects.filter(obj => obj.id !== data.annotationId);
+        shouldBroadcast = initialLength !== updatedObjects.length;
       }
       
       // Update project with new objects
       await projectService.updateProject(projectId, { objects: updatedObjects });
+      
+      // Only broadcast if there was an actual change
+      if (shouldBroadcast) {
+        // Broadcast to other users (excluding sender)
+        this.io.to(projectId).except(user.socketId).emit('annotation-changed', {
+          ...user,
+          ...data
+        });
+      }
     } catch (error) {
       console.error('Error handling annotation change:', error);
       // Emit error to the specific user
